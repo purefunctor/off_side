@@ -5,11 +5,16 @@ extern crate pest_derive;
 pub mod lexer;
 
 pub const SOURCE: &str = r#"
-let
-  x = 1
-  y = 2
-in
-  x + y
+module Main where
+
+x =
+  let
+    z = 0
+    y = 0
+  in
+    z + z
+
+y = 0
 "#;
 
 fn main() {
@@ -18,26 +23,19 @@ fn main() {
     let mut engine = lexer::LayoutEngine::new();
     let mut tokens = lexer.lex().unwrap();
 
-    let now = tokens.next().unwrap();
-    let then = tokens.next().unwrap();
-    engine.insert_layout(now, then.start);
-
-    let mut current = then;
+    let mut current = tokens.next().unwrap();
     loop {
-        match tokens.next() {
-            Some(then) => {
-                engine.insert_layout(current, then.start);
-                current = then;
-            }
-            None => {
-                engine.insert_layout(current, current.end);
-                break;
-            }
+        let future = tokens.next().expect("expected eof");
+        engine.insert_layout(current, future.start);
+        current = future;
+        if current.kind.is_eof() {
+            engine.unwind_stack(current.start);
+            break;
         }
     }
 
     println!("{:?}", engine.stack);
     for token in engine.tokens {
-        println!("{:?}", token);
+        println!("{:?}", token.kind);
     }
 }
