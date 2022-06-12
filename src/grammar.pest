@@ -1,0 +1,34 @@
+common_name = _{
+      LETTER
+    | ASCII_DIGIT
+    | "_"
+    | "'"
+}
+
+lower_name = @{
+      ( LOWERCASE_LETTER ~ common_name* )
+    | ( "_" ~ common_name+ )
+}
+
+upper_name = @{
+      UPPERCASE_LETTER ~ common_name*
+}
+
+symbol_name = @{
+      ( PUNCTUATION | SYMBOL )+
+}
+
+digit_value = @{
+      ASCII_DIGIT+
+}
+
+token = _{
+      lower_name
+    | upper_name
+    | symbol_name
+    | digit_value
+}
+
+tokens = _{ SOI ~ token* ~ EOI }
+
+WHITESPACE = _{ "\n" | "\r\n" | " " }
