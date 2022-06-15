@@ -1,3 +1,5 @@
+use std::iter;
+
 use pest::{error::Error, iterators::FlatPairs, Parser};
 
 #[derive(Parser)]
@@ -38,6 +40,16 @@ pub struct Token<'a> {
     pub kind: TokenKind<'a>,
     pub start: Position,
     pub end: Position,
+}
+
+impl<'a> Token<'a> {
+    pub fn layout_end(position: Position) -> Self {
+        Self {
+            kind: TokenKind::LayoutEnd,
+            start: position,
+            end: position,
+        }
+    }
 }
 
 /// The lexer driver.
@@ -129,23 +141,36 @@ impl<'a> Iterator for TokenStream<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LayoutDelimeter {
+pub enum LayoutDelimiter {
     Root,
     Top,
-    Let,
+    LetExpression,
+    LetStatement,
     Where,
+    Do,
+    Ado,
 }
 
-impl LayoutDelimeter {
+impl LayoutDelimiter {
     pub fn is_indented(&self) -> bool {
+        use LayoutDelimiter::*;
+
         match self {
-            LayoutDelimeter::Root | LayoutDelimeter::Top => false,
-            LayoutDelimeter::Let | LayoutDelimeter::Where => true,
+            Root | Top => false,
+            Ado | Do | LetExpression | LetStatement | Where => true,
         }
+    }
+
+    /// Returns `true` if the layout delimeter is [`Do`].
+    ///
+    /// [`Do`]: LayoutDelimeter::Do
+    #[must_use]
+    pub fn is_do(&self) -> bool {
+        matches!(self, Self::Do)
     }
 }
 
-pub type LayoutStack = Vec<(Position, LayoutDelimeter)>;
+pub type LayoutStack = Vec<(Position, LayoutDelimiter)>;
 
 #[derive(Default)]
 pub struct LayoutEngine<'a> {
@@ -170,7 +195,7 @@ impl<'a> LayoutEngine<'a> {
                 line: 1,
                 column: 1,
             },
-            LayoutDelimeter::Root,
+            LayoutDelimiter::Root,
         )];
         let tokens = vec![];
         Self { stack, tokens }
@@ -179,23 +204,68 @@ impl<'a> LayoutEngine<'a> {
     pub fn insert_layout(&mut self, token: Token<'a>, future: Position) {
         match token {
             lower_name!("let") => {
-                self.insert_default(token);
-                self.insert_start(LayoutDelimeter::Let, future);
+                self.collapse_offside(token);
+                self.insert_seperator(token);
+                self.tokens.push(token);
+                let delimiter = match self.stack.last() {
+                    Some((position, LayoutDelimiter::Do))
+                    | Some((position, LayoutDelimiter::Ado))
+                        if position.column == token.start.column =>
+                    {
+                        LayoutDelimiter::LetStatement
+                    }
+                    _ => LayoutDelimiter::LetExpression,
+                };
+                self.insert_start(delimiter, future);
             }
             lower_name!("where") => {
-                self.collapse_offside(token);
-                self.insert_default(token);
-                self.insert_start(LayoutDelimeter::Where, future);
+                self.collapse_where(token);
+                self.tokens.push(token);
+                self.insert_start(LayoutDelimiter::Where, future);
+            }
+            lower_name!("ado") => {
+                self.tokens.push(token);
+                self.insert_start(LayoutDelimiter::Ado, future);
+            }
+            lower_name!("do") => {
+                self.tokens.push(token);
+                self.insert_start(LayoutDelimiter::Do, future);
+            }
+            lower_name!("in") => {
+                let (stack_end, end_count) = self.collapse(|_, delimiter| match delimiter {
+                    LayoutDelimiter::Ado | LayoutDelimiter::LetExpression => false,
+                    _ => delimiter.is_indented(),
+                });
+
+                match &self.stack[..stack_end] {
+                    [.., (_, LayoutDelimiter::Ado), (_, LayoutDelimiter::LetStatement)] => {
+                        self.stack.truncate(stack_end.saturating_sub(2));
+                        self.tokens.extend(
+                            iter::repeat(Token::layout_end(token.start)).take(end_count + 2),
+                        );
+                    }
+                    [.., (_, delimiter)] if delimiter.is_indented() => {
+                        self.stack.truncate(stack_end.saturating_sub(1));
+                        self.tokens.extend(
+                            iter::repeat(Token::layout_end(token.start)).take(end_count + 1),
+                        );
+                    }
+                    _ => {
+                        self.collapse_offside(token);
+                        self.insert_seperator(token);
+                    }
+                }
+                self.tokens.push(token);
             }
             _ => {
                 self.collapse_offside(token);
                 self.insert_seperator(token);
-                self.insert_default(token);
+                self.tokens.push(token);
             }
         };
     }
 
-    fn insert_start(&mut self, delimiter: LayoutDelimeter, future: Position) {
+    fn insert_start(&mut self, delimiter: LayoutDelimiter, future: Position) {
         let past_indented = self
             .stack
             .iter()
@@ -215,43 +285,50 @@ impl<'a> LayoutEngine<'a> {
         })
     }
 
-    fn insert_default(&mut self, token: Token<'a>) {
-        self.tokens.push(token);
-    }
-
     fn collapse_offside(&mut self, token: Token<'a>) {
-        let (index, tokens) = self.collapse(|position, delimiter| {
+        let (stack_end, end_count) = self.collapse(|position, delimiter| {
             delimiter.is_indented() && token.start.column < position.column
-        }, token);
-        self.stack.truncate(index);
-        self.tokens.extend(tokens);
+        });
+        self.stack.truncate(stack_end);
+        self.tokens
+            .extend(iter::repeat(Token::layout_end(token.start)).take(end_count));
     }
 
-    fn collapse(&mut self, predicate: impl Fn(&Position, &LayoutDelimeter) -> bool, token: Token<'a>) -> (usize, Vec<Token<'a>>) {
-        let mut end = self.stack.len();
-        let mut tokens = vec![];
+    fn collapse_where(&mut self, token: Token<'a>) {
+        let (stack_end, end_count) = self.collapse(|position, delimiter| {
+            delimiter.is_do() || (delimiter.is_indented() && token.start.column <= position.column)
+        });
+        self.stack.truncate(stack_end);
+        self.tokens
+            .extend(iter::repeat(Token::layout_end(token.start)).take(end_count));
+    }
+
+    fn collapse<F>(&self, predicate: F) -> (usize, usize)
+    where
+        F: Fn(&Position, &LayoutDelimiter) -> bool,
+    {
+        let mut stack_end = self.stack.len();
+        let mut end_count = 0;
         for (position, delimiter) in self.stack.iter().rev() {
             if predicate(position, delimiter) {
-                end -= 1;
-                tokens.push(Token {
-                    kind: TokenKind::LayoutSeperator,
-                    start: token.start,
-                    end: token.end,
-                })
+                stack_end = stack_end.saturating_sub(1);
+                end_count += 1;
+            } else {
+                break;
             }
         }
-        (end, tokens)
+        (stack_end, end_count)
     }
 
     fn insert_seperator(&mut self, token: Token<'a>) {
         match self.stack.last() {
-            Some((position, LayoutDelimeter::Top)) => {
+            Some((position, LayoutDelimiter::Top)) => {
                 if token.start.column == position.column && token.start.line != position.line {
                     self.stack.pop();
                     self.tokens.push(Token {
                         kind: TokenKind::LayoutSeperator,
                         start: token.start,
-                        end: token.end,
+                        end: token.start,
                     });
                 }
             }
@@ -271,19 +348,19 @@ impl<'a> LayoutEngine<'a> {
         }
     }
 
-    pub fn unwind_stack(&mut self, end_position: Position) {
+    pub fn unwind_stack(&mut self, position: Position) {
         while let Some((_, delimiter)) = self.stack.pop() {
-            if let LayoutDelimeter::Root = delimiter {
+            if let LayoutDelimiter::Root = delimiter {
                 self.tokens.push(Token {
                     kind: TokenKind::Eof,
-                    start: end_position,
-                    end: end_position,
+                    start: position,
+                    end: position,
                 })
             } else if delimiter.is_indented() {
                 self.tokens.push(Token {
                     kind: TokenKind::LayoutEnd,
-                    start: end_position,
-                    end: end_position,
+                    start: position,
+                    end: position,
                 })
             }
         }
