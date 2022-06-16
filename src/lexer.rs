@@ -187,42 +187,44 @@ impl<'a> LexWithLayout<'a> {
 
     /// Updates the `queue` with layout tokens.
     fn next_layout(&mut self) {
+        use Delimiter::*;
+
         match self.current_kind() {
             lower_name!("let") => {
                 self.collapse_offside();
                 self.insert_seperator();
                 self.queue_up_current();
                 let delimiter = match self.stack.last() {
-                    Some((position, Delimiter::Do)) | Some((position, Delimiter::Ado))
+                    Some((position, Do)) | Some((position, Ado))
                         if position.column == self.current_start().column =>
                     {
-                        Delimiter::LetStatement
+                        LetStatement
                     }
-                    _ => Delimiter::LetExpression,
+                    _ => LetExpression,
                 };
                 self.insert_start(delimiter);
             }
             lower_name!("where") => {
                 self.collapse_where();
                 self.queue_up_current();
-                self.insert_start(Delimiter::Where);
+                self.insert_start(Where);
             }
             lower_name!("do") => {
                 self.queue_up_current();
-                self.insert_start(Delimiter::Do);
+                self.insert_start(Do);
             }
             lower_name!("ado") => {
                 self.queue_up_current();
-                self.insert_start(Delimiter::Ado);
+                self.insert_start(Ado);
             }
             lower_name!("in") => {
                 let (stack_end, end_count) = self.collapse(|_, delimiter| match delimiter {
-                    Delimiter::Ado | Delimiter::LetExpression => false,
+                    Ado | LetExpression => false,
                     _ => delimiter.is_indented(),
                 });
 
                 match &self.stack[..stack_end] {
-                    [.., (_, Delimiter::Ado), (_, Delimiter::LetStatement)] => {
+                    [.., (_, Ado), (_, LetStatement)] => {
                         self.truncate_layouts(stack_end.saturating_sub(2));
                         self.push_layout_ends(end_count + 2);
                     }
