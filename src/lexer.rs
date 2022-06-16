@@ -71,10 +71,7 @@ impl Delimiter {
 
 macro_rules! lower_name {
     ($name:expr) => {
-        Token {
-            kind: TokenKind::LowerName($name),
-            ..
-        }
+        TokenKind::LowerName($name)
     };
 }
 
@@ -152,8 +149,16 @@ impl<'a> LexWithLayout<'a> {
         }
     }
 
-    fn current(&self) -> Token<'a> {
-        self.current.expect("uninitialized")
+    fn current_kind(&self) -> TokenKind<'a> {
+        self.current.expect("initialized").kind
+    }
+
+    fn current_start(&self) -> Position {
+        self.current.expect("initialized").start
+    }
+
+    fn current_end(&self) -> Position {
+        self.current.expect("initialized").end
     }
 
     /// Updates the `current` token in the state.
@@ -182,14 +187,14 @@ impl<'a> LexWithLayout<'a> {
 
     /// Updates the `queue` with layout tokens.
     fn next_layout(&mut self) {
-        match self.current() {
+        match self.current_kind() {
             lower_name!("let") => {
                 self.collapse_offside();
                 self.insert_seperator();
                 self.queue_up_current();
                 let delimiter = match self.stack.last() {
                     Some((position, Delimiter::Do)) | Some((position, Delimiter::Ado))
-                        if position.column == self.current().start.column =>
+                        if position.column == self.current_start().column =>
                     {
                         Delimiter::LetStatement
                     }
@@ -242,7 +247,7 @@ impl<'a> LexWithLayout<'a> {
 
     /// Pushes the current token to the queue.
     fn queue_up_current(&mut self) {
-        self.queue.push_front(self.current());
+        self.queue.push_front(self.current.expect("initialized"));
     }
 
     /// Determines the length that the stack should truncate to and
@@ -274,7 +279,7 @@ impl<'a> LexWithLayout<'a> {
 
     /// Push multiple `LayoutEnd` tokens to the queue.
     fn push_layout_ends(&mut self, make_n: usize) {
-        let start = self.current().start;
+        let start = self.current_start();
         for _ in 0..make_n {
             self.queue.push_front(Token::layout_end(start))
         }
@@ -306,7 +311,7 @@ impl<'a> LexWithLayout<'a> {
     /// the `do` delimiter defines as part of its layout, hence, a
     /// `LayoutEnd` token is inserted.
     fn collapse_offside(&mut self) {
-        let column = self.current().start.column;
+        let column = self.current_start().column;
         self.collapse_and_commit(|position, delimiter| {
             delimiter.is_indented() && column < position.column
         });
@@ -323,7 +328,7 @@ impl<'a> LexWithLayout<'a> {
     /// main = do do do do where foo = ...
     /// ```
     fn collapse_where(&mut self) {
-        let column = self.current().start.column;
+        let column = self.current_start().column;
         self.collapse_and_commit(|position, delimiter| {
             delimiter.is_do() || (delimiter.is_indented() && column <= position.column)
         })
@@ -340,7 +345,7 @@ impl<'a> LexWithLayout<'a> {
 
         let next_offset = match self.pairs.peek() {
             Some(next) => next.as_span().start(),
-            None => self.current().end.offset,
+            None => self.current_end().offset,
         };
         let next = self.get_position(next_offset);
 
@@ -362,7 +367,7 @@ impl<'a> LexWithLayout<'a> {
     /// stack is indented, and the current token matches with the
     /// delimiter's expected column.
     fn insert_seperator(&mut self) {
-        let token = self.current().start;
+        let token = self.current_start();
         match self.stack.last() {
             Some((position, Delimiter::Top)) => {
                 if token.column == position.column && token.line != position.line {
@@ -394,7 +399,7 @@ impl<'a> LexWithLayout<'a> {
     /// pushes the appropriate amount for `LayoutEnd` tokens and an
     /// `Eof` token.
     fn unwind_layout(&mut self) {
-        let position = self.current().end;
+        let position = self.current_end();
         while let Some((_, delimiter)) = self.stack.pop() {
             if let Delimiter::Root = delimiter {
                 self.queue.push_front(Token {
