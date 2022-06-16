@@ -33,6 +33,30 @@ pub struct Token<'a> {
 }
 
 impl<'a> Token<'a> {
+    pub fn eof(position: Position) -> Self {
+        Self {
+            kind: TokenKind::Eof,
+            start: position,
+            end: position,
+        }
+    }
+
+    pub fn layout_start(position: Position) -> Self {
+        Self {
+            kind: TokenKind::LayoutStart,
+            start: position,
+            end: position,
+        }
+    }
+
+    pub fn layout_separator(position: Position) -> Self {
+        Self {
+            kind: TokenKind::LayoutSeperator,
+            start: position,
+            end: position,
+        }
+    }
+
     pub fn layout_end(position: Position) -> Self {
         Self {
             kind: TokenKind::LayoutEnd,
@@ -374,11 +398,7 @@ impl<'a> LexWithLayout<'a> {
             Some((position, Delimiter::Top)) => {
                 if token.column == position.column && token.line != position.line {
                     self.stack.pop();
-                    self.queue.push_front(Token {
-                        kind: TokenKind::LayoutSeperator,
-                        start: token,
-                        end: token,
-                    });
+                    self.queue.push_front(Token::layout_separator(token));
                 }
             }
             Some((position, delimiter)) => {
@@ -386,11 +406,7 @@ impl<'a> LexWithLayout<'a> {
                     && token.column == position.column
                     && token.line != position.line
                 {
-                    self.queue.push_front(Token {
-                        kind: TokenKind::LayoutSeperator,
-                        start: token,
-                        end: token,
-                    });
+                    self.queue.push_front(Token::layout_separator(token));
                 }
             }
             _ => {}
@@ -404,17 +420,9 @@ impl<'a> LexWithLayout<'a> {
         let position = self.current_end();
         while let Some((_, delimiter)) = self.stack.pop() {
             if let Delimiter::Root = delimiter {
-                self.queue.push_front(Token {
-                    kind: TokenKind::Eof,
-                    start: position,
-                    end: position,
-                })
+                self.queue.push_front(Token::eof(position));
             } else if delimiter.is_indented() {
-                self.queue.push_front(Token {
-                    kind: TokenKind::LayoutEnd,
-                    start: position,
-                    end: position,
-                })
+                self.queue.push_front(Token::layout_end(position));
             }
         }
     }
