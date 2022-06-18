@@ -9,9 +9,11 @@ pub mod lexer;
 pub const SOURCE: &str = r#"
 module Test where
 
-main = ado
-  let a = let b = c in d
-  in a
+main =
+  case a, z of
+    b | c
+      , d -> e
+    f -> g
 "#;
 
 fn main() {

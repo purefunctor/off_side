@@ -75,6 +75,8 @@ pub enum Delimiter {
     Where,
     Do,
     Ado,
+    Case,
+    Of,
 }
 
 impl Delimiter {
@@ -82,8 +84,8 @@ impl Delimiter {
         use Delimiter::*;
 
         match self {
-            Root | Top => false,
-            LetExpression | LetStatement | Where | Do | Ado => true,
+            Root | Top | Case => false,
+            LetExpression | LetStatement | Where | Do | Ado | Of => true,
         }
     }
 
@@ -262,6 +264,31 @@ impl<'a> LexWithLayout<'a> {
                     }
                 }
                 self.queue_up_current();
+            }
+            lower_name!("case") => {
+                self.queue_up_current();
+                self.insert_start(Case);
+            }
+            lower_name!("of") => {
+                let (stack_end, end_count) = self.collapse(|_, delimiter| {
+                    delimiter.is_indented()
+                });
+
+                match &self.stack[..stack_end] {
+                    [.., (_, Case)] => {
+                        self.truncate_layouts(stack_end.saturating_sub(1));
+                        self.push_layout_ends(end_count + 1);
+                        self.queue_up_current();
+                        self.insert_start(Of);
+                    }
+                    _ => {
+                        self.truncate_layouts(stack_end);
+                        self.push_layout_ends(end_count);
+                        self.collapse_offside();
+                        self.insert_seperator();
+                        self.queue_up_current();
+                    }
+                }
             }
             _ => {
                 self.collapse_offside();
