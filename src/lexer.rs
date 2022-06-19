@@ -225,9 +225,7 @@ impl<'a> LexWithLayout<'a> {
 
         match self.current_kind() {
             lower_name!("let") => {
-                self.collapse_offside();
-                self.insert_seperator();
-                self.queue_up_current();
+                self.insert_default_really();
                 let delimiter = match self.stack.last() {
                     Some((position, Do | Ado))
                         if position.column == self.current_start().column =>
@@ -274,11 +272,8 @@ impl<'a> LexWithLayout<'a> {
                 self.queue_up_current();
             }
             lower_name!("case") => {
-                self.collapse_offside();
-                self.insert_seperator();
-                self.queue_up_current();
-                let next = self.next_position();
-                self.stack.push((next, Case));
+                self.insert_default_really();
+                self.push_delimiter_at_next(Case);
             }
             lower_name!("of") => {
                 let (take_n, make_n) = self.collapse(|_, delimiter| delimiter.is_indented());
@@ -289,15 +284,12 @@ impl<'a> LexWithLayout<'a> {
                         self.push_layout_ends(make_n);
                         self.queue_up_current();
                         self.insert_start(Of);
-                        let next = self.next_position();
-                        self.stack.push((next, CaseBinders));
+                        self.push_delimiter_at_next(CaseBinders);
                     }
                     _ => {
                         self.truncate_layouts(take_n);
                         self.push_layout_ends(make_n);
-                        self.collapse_offside();
-                        self.insert_seperator();
-                        self.queue_up_current();
+                        self.insert_default_really();
                     }
                 }
             }
@@ -317,9 +309,7 @@ impl<'a> LexWithLayout<'a> {
                     _ => {
                         self.truncate_layouts(stack_end);
                         self.push_layout_ends(end_count);
-                        self.collapse_offside();
-                        self.insert_seperator();
-                        self.queue_up_current();
+                        self.insert_default_really();
                     }
                 }
             }
@@ -341,11 +331,20 @@ impl<'a> LexWithLayout<'a> {
                 self.queue_up_current();
             }
             _ => {
-                self.collapse_offside();
-                self.insert_seperator();
-                self.queue_up_current();
+                self.insert_default_really();
             }
         }
+    }
+
+    fn insert_default_really(&mut self) {
+        self.collapse_offside();
+        self.insert_seperator();
+        self.queue_up_current();
+    }
+
+    fn push_delimiter_at_next(&mut self, delimiter: Delimiter) {
+        let next = self.next_position();
+        self.stack.push((next, delimiter));
     }
 
     /// Pushes the current token to the queue.
