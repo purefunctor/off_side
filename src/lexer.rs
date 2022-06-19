@@ -72,6 +72,7 @@ pub enum Delimiter {
     Case,
     CaseBinders,
     CaseGuard,
+    DeclarationGuard,
     Do,
     LetExpression,
     LetStatement,
@@ -91,7 +92,7 @@ impl Delimiter {
         use Delimiter::*;
 
         match self {
-            Root | Top | Case | CaseBinders | CaseGuard => false,
+            Root | Top | Case | CaseBinders | CaseGuard | DeclarationGuard => false,
             LetExpression | LetStatement | Where | Do | Ado | Of => true,
         }
     }
@@ -130,9 +131,40 @@ pub struct LexWithLayout<'a> {
     queue: VecDeque<Token<'a>>,
 }
 
+impl<'a> Iterator for LexWithLayout<'a> {
+    type Item = Token<'a>;
+
+    /// This particular implementation of `next` is non-linear in that
+    /// it first drains the `queue` before actually moving to the next
+    /// token. Once empty, it may get filled up again unless `pairs`
+    /// is already exhausted. If an `Eof` is encountered while the
+    /// `queue` is empty, `LayoutEnd` tokens will get pushed to the
+    /// `queue`, and will be yieled at the next iteration.
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.queue.is_empty() {
+            self.next_current()?;
+            self.next_with_layout();
+            let token = self.queue.pop_back();
+            if let Some(Token {
+                kind: TokenKind::Eof,
+                ..
+            }) = token
+            {
+                self.unwind_layout();
+                self.queue.pop_back()
+            } else {
+                token
+            }
+        } else {
+            self.queue.pop_back()
+        }
+    }
+}
+
+/// Top-level methods.
 impl<'a> LexWithLayout<'a> {
-    /// Creates a new iterator given the `source` and the `pairs`.
-    pub fn new(source: &'a str, pairs: Peekable<FlatPairs<'a, Rule>>) -> Self {
+    /// Creates a new `LexWithLayout` iterator.
+    fn new(source: &'a str, pairs: Peekable<FlatPairs<'a, Rule>>) -> Self {
         let mut offset = 0;
         let mut offsets = vec![];
         for line in source.split('\n') {
@@ -160,7 +192,7 @@ impl<'a> LexWithLayout<'a> {
     }
 
     /// Determines the line and column position of a given byte offset.
-    pub fn get_position(&self, offset: usize) -> Position {
+    fn get_position(&self, offset: usize) -> Position {
         if offset > self.source.len() {
             panic!("offset is greater than the source")
         }
@@ -182,179 +214,84 @@ impl<'a> LexWithLayout<'a> {
             column,
         }
     }
+}
 
+/// `current_*` and `future_*` methods for querying information about
+/// the current and next tokens.
+impl<'a> LexWithLayout<'a> {
+    /// Get the kind of the current token.
     fn current_kind(&self) -> TokenKind<'a> {
-        self.current.expect("initialized").kind
-    }
-
-    fn current_start(&self) -> Position {
-        self.current.expect("initialized").start
-    }
-
-    fn current_end(&self) -> Position {
-        self.current.expect("initialized").end
-    }
-
-    /// Updates the `current` token in the state.
-    fn next_current(&mut self) -> Option<()> {
-        use TokenKind::*;
-
-        let pair = self.pairs.next()?;
-        let rule = pair.as_rule();
-        let span = pair.as_span();
-        let slice = pair.as_str();
-        self.current = Some(Token {
-            kind: match rule {
-                Rule::upper_name => UpperName(slice),
-                Rule::lower_name => LowerName(slice),
-                Rule::symbol_name => SymbolName(slice),
-                Rule::digit_value => LiteralInteger(slice),
-                Rule::EOI => Eof,
-                rule => unreachable!("unhandled rule {:?}", rule),
-            },
-            start: self.get_position(span.start()),
-            end: self.get_position(span.end()),
-        });
-
-        Some(())
-    }
-
-    /// Updates the `queue` with layout tokens.
-    fn next_layout(&mut self) {
-        use Delimiter::*;
-
-        match self.current_kind() {
-            lower_name!("let") => {
-                self.insert_default_really();
-                let delimiter = match self.stack.last() {
-                    Some((position, Do | Ado))
-                        if position.column == self.current_start().column =>
-                    {
-                        LetStatement
-                    }
-                    _ => LetExpression,
-                };
-                self.insert_start(delimiter);
-            }
-            lower_name!("where") => {
-                self.collapse_where();
-                self.queue_up_current();
-                self.insert_start(Where);
-            }
-            lower_name!("do") => {
-                self.queue_up_current();
-                self.insert_start(Do);
-            }
-            lower_name!("ado") => {
-                self.queue_up_current();
-                self.insert_start(Ado);
-            }
-            lower_name!("in") => {
-                let (take_n, make_n) = self.collapse(|_, delimiter| match delimiter {
-                    Ado | LetExpression => false,
-                    _ => delimiter.is_indented(),
-                });
-
-                match &self.stack[..take_n] {
-                    [.., (_, Ado), (_, LetStatement)] => {
-                        self.truncate_layouts(take_n.saturating_sub(2));
-                        self.push_layout_ends(make_n + 2);
-                    }
-                    [.., (_, delimiter)] if delimiter.is_indented() => {
-                        self.truncate_layouts(take_n.saturating_sub(1));
-                        self.push_layout_ends(make_n + 1);
-                    }
-                    _ => {
-                        self.collapse_offside();
-                        self.insert_seperator();
-                    }
-                }
-                self.queue_up_current();
-            }
-            lower_name!("case") => {
-                self.insert_default_really();
-                self.push_delimiter_at_next(Case);
-            }
-            lower_name!("of") => {
-                let (take_n, make_n) = self.collapse(|_, delimiter| delimiter.is_indented());
-
-                match &self.stack[..take_n] {
-                    [.., (_, Case)] => {
-                        self.truncate_layouts(take_n);
-                        self.push_layout_ends(make_n);
-                        self.queue_up_current();
-                        self.insert_start(Of);
-                        self.push_delimiter_at_next(CaseBinders);
-                    }
-                    _ => {
-                        self.truncate_layouts(take_n);
-                        self.push_layout_ends(make_n);
-                        self.insert_default_really();
-                    }
-                }
-            }
-            symbol_name!("|") => {
-                let token = self.current_start();
-                let (stack_end, end_count) = self.collapse(|position, delimiter| {
-                    delimiter.is_indented() && token.column <= position.column
-                });
-
-                match &self.stack[..stack_end] {
-                    [.., (_, Of)] => {
-                        self.truncate_layouts(stack_end);
-                        self.push_layout_ends(end_count);
-                        self.stack.push((token, CaseGuard));
-                        self.queue_up_current();
-                    }
-                    _ => {
-                        self.truncate_layouts(stack_end);
-                        self.push_layout_ends(end_count);
-                        self.insert_default_really();
-                    }
-                }
-            }
-            symbol_name!("->") => {
-                let token = self.current_start();
-                self.collapse_and_commit(|position, delimiter| match delimiter {
-                    Do => true,
-                    Of => false,
-                    _ => delimiter.is_indented() && token.column <= position.column,
-                });
-                loop {
-                    match self.stack.last() {
-                        Some((_, CaseGuard | CaseBinders)) => {
-                            self.stack.pop();
-                        }
-                        _ => break,
-                    }
-                }
-                self.queue_up_current();
-            }
-            _ => {
-                self.insert_default_really();
-            }
+        match self.current {
+            Some(current) => current.kind,
+            None => panic!("current token is uninitialized"),
         }
     }
-
-    fn insert_default_really(&mut self) {
-        self.collapse_offside();
-        self.insert_seperator();
-        self.queue_up_current();
+    /// Get the start position of the current token.
+    fn current_start(&self) -> Position {
+        match self.current {
+            Some(current) => current.start,
+            None => panic!("current token is uninitialized"),
+        }
     }
-
-    fn push_delimiter_at_next(&mut self, delimiter: Delimiter) {
-        let next = self.next_position();
-        self.stack.push((next, delimiter));
+    /// Get the end position of the current token.
+    fn current_end(&self) -> Position {
+        match self.current {
+            Some(current) => current.end,
+            None => panic!("current token is uninitialized"),
+        }
     }
-
-    /// Pushes the current token to the queue.
-    fn queue_up_current(&mut self) {
-        self.queue.push_front(self.current.expect("initialized"));
+    /// Get the start position of a future token. Returns the end of
+    /// the current token if there's no more future tokens.
+    fn future_start(&mut self) -> Position {
+        if let Some(future) = self.pairs.peek() {
+            let start_offset = future.as_span().start();
+            self.get_position(start_offset)
+        } else {
+            self.current_end()
+        }
     }
+}
 
-    /// Determines the length that the stack should truncate to and
-    /// the number of `LayoutEnd` tokens to be pushed to the queue,
-    /// given a predicate.
+/// Primitive methods for manipulating the token queue and the
+/// delimiter stack.
+impl<'a> LexWithLayout<'a> {
+    /// Pushes a delimiter to the stack at a future token's position,
+    /// using the current token's end position if it does not exist.
+    fn push_delimiter_future_start(&mut self, delimiter: Delimiter) {
+        let start = self.future_start();
+        self.stack.push((start, delimiter));
+    }
+    /// Pushes the current token to the queue, panicking if it's
+    /// uninitialized.
+    fn queue_current(&mut self) {
+        match self.current {
+            Some(current) => self.queue.push_front(current),
+            None => panic!("current token is uninitialized"),
+        }
+    }
+    /// Truncates the delimiter stack to `n` elements.
+    fn discard_delimiter_n(&mut self, value: usize) {
+        self.stack.truncate(value);
+    }
+    /// Pushes `n` `LayoutEnd` tokens to the queue.
+    fn queue_n_layout_end(&mut self, value: usize) {
+        for _ in 0..value {
+            self.queue
+                .push_front(Token::layout_end(self.current_start()))
+        }
+    }
+}
+
+/// Core methods for implementing various layout rules.
+impl<'a> LexWithLayout<'a> {
+    /// Given a predicate, this "removes" elements from the delimiter
+    /// stack and "adds" the appropriate amount of `LayoutEnd` tokens
+    /// to the queue.
+    ///
+    /// In practice, this performs no mutable operations and only
+    /// returns two things: the new size of the stack to be used
+    /// alongside `discard_delimiter_n` and the number of `LayoutEnd`
+    /// tokens to be inserted with `queue_n_layout_end`.
     fn collapse<F>(&self, predicate: F) -> (usize, usize)
     where
         F: Fn(&Position, &Delimiter) -> bool,
@@ -373,106 +310,50 @@ impl<'a> LexWithLayout<'a> {
 
         (take_n, make_n)
     }
-
-    /// Truncate the layout stack to a specific index.
-    fn truncate_layouts(&mut self, take_n: usize) {
-        self.stack.truncate(take_n);
-    }
-
-    /// Push multiple `LayoutEnd` tokens to the queue.
-    fn push_layout_ends(&mut self, make_n: usize) {
-        let start = self.current_start();
-        for _ in 0..make_n {
-            self.queue.push_front(Token::layout_end(start))
-        }
-    }
-
-    /// Run `collapse` and commit the changes.
-    fn collapse_and_commit<F>(&mut self, predicate: F)
+    /// A version of `collapse` that alsp performs the associated
+    /// mutations.
+    fn collapse_mut<F>(&mut self, predicate: F)
     where
         F: Fn(&Position, &Delimiter) -> bool,
     {
         let (take_n, make_n) = self.collapse(predicate);
-        self.truncate_layouts(take_n);
-        self.push_layout_ends(make_n);
+        self.discard_delimiter_n(take_n);
+        self.queue_n_layout_end(make_n);
     }
-
-    /// Pops indented delimiters from the layout stack if the current
-    /// token is dedented past them.
-    ///
-    /// # Example
-    ///
-    /// ```hs
-    /// main = do
-    ///   logShow "Hello, World."
-    ///
-    /// meaning_of_life = 42
-    /// ```
-    ///
-    /// The `meaning_of_life` token is dedented past the column that
-    /// the `do` delimiter defines as part of its layout, hence, a
-    /// `LayoutEnd` token is inserted.
+    /// A version of `collapse` that discards delimiters if they
+    /// introduce an indentation context and the current token is
+    /// dedented past them, effectively ending said indentation
+    /// context.
     fn collapse_offside(&mut self) {
-        let column = self.current_start().column;
-        self.collapse_and_commit(|position, delimiter| {
-            delimiter.is_indented() && column < position.column
+        let token = self.current_start();
+        self.collapse_mut(|position, delimiter| {
+            delimiter.is_indented() && token.column < position.column
         });
     }
-
-    /// Pops `do` delimiters from the layout stack or indented
-    /// delimiters if the current token is dedented past them.
-    ///
-    /// # Example
-    ///
-    /// `where` always ends `do` blocks.
-    ///
-    /// ```hs
-    /// main = do do do do where foo = ...
-    /// ```
-    fn collapse_where(&mut self) {
-        let column = self.current_start().column;
-        self.collapse_and_commit(|position, delimiter| {
-            delimiter.is_do() || (delimiter.is_indented() && column <= position.column)
-        })
-    }
-
-    fn next_position(&mut self) -> Position {
-        let next_offset = match self.pairs.peek() {
-            Some(next) => next.as_span().start(),
-            None => self.current_end().offset,
-        };
-
-        self.get_position(next_offset)
-    }
-
-    /// Inserts a `LayoutStart` token and pushes a delimiter to the
-    /// layout stack if the next token is indented past the latest
-    /// delimiter.
+    /// Pushes a `LayoutStart` token to the queue and a provided
+    /// delimiter to the delimiter stack if a future token is indented
+    /// past the most recent delimiter that introduces an indentation
+    /// context.
     fn insert_start(&mut self, delimiter: Delimiter) {
-        let next = self.next_position();
+        let next = self.future_start();
 
-        let past_indented = self
+        let recent_indented = self
             .stack
             .iter()
             .rfind(|(_, delimiter)| delimiter.is_indented());
 
-        if let Some((past, _)) = past_indented {
+        if let Some((past, _)) = recent_indented {
             if next.column <= past.column {
                 return;
             }
         }
 
         self.stack.push((next, delimiter));
-        self.queue.push_front(Token {
-            kind: TokenKind::LayoutStart,
-            start: next,
-            end: next,
-        });
+        self.queue.push_front(Token::layout_start(next));
     }
-
-    /// Inserts a `LayoutSeperator` token if the top of the layout
-    /// stack is indented, and the current token matches with the
-    /// delimiter's expected column.
+    /// Pushes a `LayoutSeperator` token to the delimiter stack if
+    /// the topmost element introduces an indentation context and
+    /// the current token aligns with it.
     fn insert_seperator(&mut self) {
         let token = self.current_start();
         match self.stack.last() {
@@ -496,10 +377,16 @@ impl<'a> LexWithLayout<'a> {
             _ => {}
         }
     }
-
-    /// Removes all remaining delimiters in the layout stack and
-    /// pushes the appropriate amount for `LayoutEnd` tokens and an
-    /// `Eof` token.
+    /// Pushes the current token to the queue after running
+    /// `collapse_offside` and `insert_separator`.
+    fn queue_current_default(&mut self) {
+        self.collapse_offside();
+        self.insert_seperator();
+        self.queue_current();
+    }
+    /// Discards all remaining elements from the layout stack while
+    /// pushing the appropriate amount of `LayoutEnd` and `Eof` tokens
+    /// to the queue.
     fn unwind_layout(&mut self) {
         let position = self.current_end();
         while let Some((_, delimiter)) = self.stack.pop() {
@@ -512,32 +399,191 @@ impl<'a> LexWithLayout<'a> {
     }
 }
 
-impl<'a> Iterator for LexWithLayout<'a> {
-    type Item = Token<'a>;
+/// Driver methods for advancing the current state.
+impl<'a> LexWithLayout<'a> {
+    /// Updates the current token by advancing the internal pairs
+    /// iterator, returning an `Option` for easier short-circuiting.
+    fn next_current(&mut self) -> Option<()> {
+        use TokenKind::*;
 
-    /// This particular implementation of `next` is non-linear in that
-    /// it first drains the `queue` before actually moving to the next
-    /// token. Once empty, it may get filled up again unless `pairs`
-    /// is already exhausted. If an `Eof` is encountered while the
-    /// `queue` is empty, `LayoutEnd` tokens will get pushed to the
-    /// `queue`, and will be yieled at the next iteration.
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.queue.is_empty() {
-            self.next_current()?;
-            self.next_layout();
-            let token = self.queue.pop_back();
-            if let Some(Token {
-                kind: TokenKind::Eof,
-                ..
-            }) = token
-            {
-                self.unwind_layout();
-                self.queue.pop_back()
-            } else {
-                token
+        let pair = self.pairs.next()?;
+        let rule = pair.as_rule();
+        let span = pair.as_span();
+        let slice = pair.as_str();
+        self.current = Some(Token {
+            kind: match rule {
+                Rule::upper_name => UpperName(slice),
+                Rule::lower_name => LowerName(slice),
+                Rule::symbol_name => SymbolName(slice),
+                Rule::digit_value => LiteralInteger(slice),
+                Rule::EOI => Eof,
+                rule => unreachable!("unhandled rule {:?}", rule),
+            },
+            start: self.get_position(span.start()),
+            end: self.get_position(span.end()),
+        });
+
+        Some(())
+    }
+    /// Pushes the current token to the queue with respect to layout
+    /// rules in the language.
+    fn next_with_layout(&mut self) {
+        use Delimiter::*;
+
+        match self.current_kind() {
+            lower_name!("let") => {
+                self.queue_current_default();
+                // `let` in `do`/`ado` is a statement.
+                let delimiter = match self.stack.last() {
+                    Some((position, Do | Ado))
+                        if self.current_start().column == position.column =>
+                    {
+                        LetStatement
+                    }
+                    _ => LetExpression,
+                };
+                self.insert_start(delimiter);
             }
-        } else {
-            self.queue.pop_back()
+            lower_name!("where") => {
+                let token = self.current_start();
+                // `where` ends the following contexts:
+                // 1. `do` blocks
+                // 2. any delimiter with an indentation context _and_
+                //    whose position aligns with, or is greater than
+                //    the current token.
+                self.collapse_mut(|position, delimiter| {
+                    delimiter.is_do()
+                        || (delimiter.is_indented() && token.column <= position.column)
+                });
+                self.queue_current();
+                self.insert_start(Where);
+            }
+            lower_name!("do") => {
+                self.queue_current();
+                self.insert_start(Do);
+            }
+            lower_name!("ado") => {
+                self.queue_current();
+                self.insert_start(Ado);
+            }
+            lower_name!("in") => {
+                // `in` ends any indented delimiter except for `Ado`
+                // or a `LetExpression` since we handle them manually.
+                let (stack_size, end_count) = self.collapse(|_, delimiter| match delimiter {
+                    Ado | LetExpression => false,
+                    _ => delimiter.is_indented(),
+                });
+
+                match &self.stack[..stack_size] {
+                    // 1. this is run when a `LetExpression` is used
+                    // inside of a `LetStatement` in an `Ado` block,
+                    // like so:
+                    //
+                    // ```hs
+                    // test = ado
+                    //   let a = let b = c in c
+                    //   in a
+                    // ```
+                    [.., (_, Ado), (_, LetStatement)] => {
+                        // `in` terminates the whole `Ado` block, so
+                        // we include them when truncating the stack
+                        // and pushing layout tokens.
+                        self.discard_delimiter_n(stack_size.saturating_sub(2));
+                        self.queue_n_layout_end(end_count + 2)
+                    }
+                    // 2. this is run when any delimiter that
+                    // introduces an indentation context is
+                    // encountered; this also essentially catches
+                    // `Ado` blocks w/o the specialization seen above.
+                    [.., (_, delimiter)] if delimiter.is_indented() => {
+                        self.discard_delimiter_n(stack_size.saturating_sub(1));
+                        self.queue_n_layout_end(end_count + 1);
+                    }
+                    // 3. fallthrough; this just collapses everything
+                    // "normally" and inserts a separator before the
+                    // current token.
+                    _ => {
+                        self.collapse_offside();
+                        self.insert_seperator();
+                    }
+                }
+                self.queue_current();
+            }
+            lower_name!("case") => {
+                self.queue_current_default();
+                self.push_delimiter_future_start(Case);
+            }
+            lower_name!("of") => {
+                // end all indented delimiters likely after `case`.
+                let (stack_size, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
+
+                match &self.stack[..stack_size] {
+                    [.., (_, Case)] => {
+                        self.discard_delimiter_n(stack_size.saturating_sub(1));
+                        self.queue_n_layout_end(end_count);
+                        self.queue_current();
+                        self.insert_start(Of);
+                        // `CaseBinders` essentially "hides" `Of` from
+                        // being eliminated by a collapse. After a
+                        // `->` is encountered, the underlying `Of` is
+                        // revealed.
+                        self.push_delimiter_future_start(CaseBinders);
+                    }
+                    _ => {
+                        self.discard_delimiter_n(stack_size);
+                        self.queue_n_layout_end(end_count);
+                        self.queue_current_default();
+                    }
+                }
+            }
+            symbol_name!("|") => {
+                // end all indented delimiters if the current token is
+                // also dedented past said delimiter.
+                let token = self.current_start();
+                let (stack_end, end_count) = self.collapse(|position, delimiter| {
+                    delimiter.is_indented() && token.column <= position.column
+                });
+
+                match &self.stack[..stack_end] {
+                    [.., (_, Of)] => {
+                        self.discard_delimiter_n(stack_end);
+                        self.queue_n_layout_end(end_count);
+                        // `CaseGuard` essentially "hides" `Of` from
+                        // being eliminated by a collapse. After a
+                        // `->` is encountered, the underlying `Of` is
+                        // revealed.
+                        self.push_delimiter_future_start(CaseGuard);
+                        self.queue_current();
+                    }
+                    _ => {
+                        self.discard_delimiter_n(stack_end);
+                        self.queue_n_layout_end(end_count);
+                        self.queue_current_default();
+                    }
+                }
+            }
+            symbol_name!("->") => {
+                // 1. `->` always ends `Do`
+                // 2. `->` never ends `Of`
+                // 3. `->` ends indented delimiters if the current
+                // token is also dedented past said delimiter.
+                let token = self.current_start();
+                self.collapse_mut(|position, delimiter| match delimiter {
+                    Do => true,
+                    Of => false,
+                    _ => delimiter.is_indented() && token.column <= position.column,
+                });
+                // `->` elimjnates certain delimiters, which then
+                // exposes the ones which can be eliminated through a
+                // collapse.
+                if let Some((_, CaseGuard | CaseBinders)) = self.stack.last() {
+                    self.stack.pop();
+                }
+                self.queue_current();
+            }
+            _ => {
+                self.queue_current_default();
+            }
         }
     }
 }
