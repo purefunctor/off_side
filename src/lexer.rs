@@ -68,36 +68,44 @@ impl<'a> Token<'a> {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Delimiter {
-    Root,
-    Top,
-    LetExpression,
-    LetStatement,
-    Where,
-    Do,
     Ado,
     Case,
+    CaseBinders,
+    CaseGuard,
+    Do,
+    LetExpression,
+    LetStatement,
     Of,
+    Root,
+    Top,
+    Where,
 }
 
 impl Delimiter {
+    fn is_do(&self) -> bool {
+        use Delimiter::*;
+        matches!(self, Do)
+    }
+
     pub fn is_indented(&self) -> bool {
         use Delimiter::*;
 
         match self {
-            Root | Top | Case => false,
+            Root | Top | Case | CaseBinders | CaseGuard => false,
             LetExpression | LetStatement | Where | Do | Ado | Of => true,
         }
-    }
-
-    fn is_do(&self) -> bool {
-        use Delimiter::*;
-        matches!(self, Do)
     }
 }
 
 macro_rules! lower_name {
     ($name:expr) => {
         TokenKind::LowerName($name)
+    };
+}
+
+macro_rules! symbol_name {
+    ($name:expr) => {
+        TokenKind::SymbolName($name)
     };
 }
 
@@ -244,19 +252,19 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_start(Ado);
             }
             lower_name!("in") => {
-                let (stack_end, end_count) = self.collapse(|_, delimiter| match delimiter {
+                let (take_n, make_n) = self.collapse(|_, delimiter| match delimiter {
                     Ado | LetExpression => false,
                     _ => delimiter.is_indented(),
                 });
 
-                match &self.stack[..stack_end] {
+                match &self.stack[..take_n] {
                     [.., (_, Ado), (_, LetStatement)] => {
-                        self.truncate_layouts(stack_end.saturating_sub(2));
-                        self.push_layout_ends(end_count + 2);
+                        self.truncate_layouts(take_n.saturating_sub(2));
+                        self.push_layout_ends(make_n + 2);
                     }
                     [.., (_, delimiter)] if delimiter.is_indented() => {
-                        self.truncate_layouts(stack_end.saturating_sub(1));
-                        self.push_layout_ends(end_count + 1);
+                        self.truncate_layouts(take_n.saturating_sub(1));
+                        self.push_layout_ends(make_n + 1);
                     }
                     _ => {
                         self.collapse_offside();
@@ -266,20 +274,45 @@ impl<'a> LexWithLayout<'a> {
                 self.queue_up_current();
             }
             lower_name!("case") => {
+                self.collapse_offside();
+                self.insert_seperator();
                 self.queue_up_current();
-                self.insert_start(Case);
+                let next = self.next_position();
+                self.stack.push((next, Case));
             }
             lower_name!("of") => {
-                let (stack_end, end_count) = self.collapse(|_, delimiter| {
-                    delimiter.is_indented()
+                let (take_n, make_n) = self.collapse(|_, delimiter| delimiter.is_indented());
+
+                match &self.stack[..take_n] {
+                    [.., (_, Case)] => {
+                        self.truncate_layouts(take_n);
+                        self.push_layout_ends(make_n);
+                        self.queue_up_current();
+                        self.insert_start(Of);
+                        let next = self.next_position();
+                        self.stack.push((next, CaseBinders));
+                    }
+                    _ => {
+                        self.truncate_layouts(take_n);
+                        self.push_layout_ends(make_n);
+                        self.collapse_offside();
+                        self.insert_seperator();
+                        self.queue_up_current();
+                    }
+                }
+            }
+            symbol_name!("|") => {
+                let token = self.current_start();
+                let (stack_end, end_count) = self.collapse(|position, delimiter| {
+                    delimiter.is_indented() && token.column <= position.column
                 });
 
                 match &self.stack[..stack_end] {
-                    [.., (_, Case)] => {
-                        self.truncate_layouts(stack_end.saturating_sub(1));
-                        self.push_layout_ends(end_count + 1);
+                    [.., (_, Of)] => {
+                        self.truncate_layouts(stack_end);
+                        self.push_layout_ends(end_count);
+                        self.stack.push((token, CaseGuard));
                         self.queue_up_current();
-                        self.insert_start(Of);
                     }
                     _ => {
                         self.truncate_layouts(stack_end);
@@ -289,6 +322,23 @@ impl<'a> LexWithLayout<'a> {
                         self.queue_up_current();
                     }
                 }
+            }
+            symbol_name!("->") => {
+                let token = self.current_start();
+                self.collapse_and_commit(|position, delimiter| match delimiter {
+                    Do => true,
+                    Of => false,
+                    _ => delimiter.is_indented() && token.column <= position.column,
+                });
+                loop {
+                    match self.stack.last() {
+                        Some((_, CaseGuard | CaseBinders)) => {
+                            self.stack.pop();
+                        }
+                        _ => break,
+                    }
+                }
+                self.queue_up_current();
             }
             _ => {
                 self.collapse_offside();
@@ -387,20 +437,25 @@ impl<'a> LexWithLayout<'a> {
         })
     }
 
-    /// Inserts a `LayoutStart` token and pushes a delimiter to the
-    /// layout stack if the next token is indented past the latest
-    /// delimiter.
-    fn insert_start(&mut self, delimiter: Delimiter) {
-        let past_indented = self
-            .stack
-            .iter()
-            .rfind(|(_, delimiter)| delimiter.is_indented());
-
+    fn next_position(&mut self) -> Position {
         let next_offset = match self.pairs.peek() {
             Some(next) => next.as_span().start(),
             None => self.current_end().offset,
         };
-        let next = self.get_position(next_offset);
+
+        self.get_position(next_offset)
+    }
+
+    /// Inserts a `LayoutStart` token and pushes a delimiter to the
+    /// layout stack if the next token is indented past the latest
+    /// delimiter.
+    fn insert_start(&mut self, delimiter: Delimiter) {
+        let next = self.next_position();
+
+        let past_indented = self
+            .stack
+            .iter()
+            .rfind(|(_, delimiter)| delimiter.is_indented());
 
         if let Some((past, _)) = past_indented {
             if next.column <= past.column {
@@ -434,6 +489,9 @@ impl<'a> LexWithLayout<'a> {
                     && token.line != position.line
                 {
                     self.queue.push_front(Token::layout_separator(token));
+                    if let Delimiter::Of = delimiter {
+                        self.stack.push((token, Delimiter::CaseBinders));
+                    }
                 }
             }
             _ => {}

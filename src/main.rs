@@ -9,11 +9,13 @@ pub mod lexer;
 pub const SOURCE: &str = r#"
 module Test where
 
-main =
-  case a, z of
-    b | c
-      , d -> e
-    f -> g
+test = case a, b of
+  c, d
+   | e ->
+     case e of
+       f | true -> bar
+         | false -> baz
+   | f -> g
 "#;
 
 fn main() {
