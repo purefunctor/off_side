@@ -229,7 +229,7 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_seperator();
                 self.queue_up_current();
                 let delimiter = match self.stack.last() {
-                    Some((position, Do)) | Some((position, Ado))
+                    Some((position, Do | Ado))
                         if position.column == self.current_start().column =>
                     {
                         LetStatement
