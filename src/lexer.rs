@@ -260,6 +260,12 @@ impl<'a> LexWithLayout<'a> {
 /// Primitive methods for manipulating the token queue and the
 /// delimiter stack.
 impl<'a> LexWithLayout<'a> {
+    /// Pushes a delimiter to the stack at the current token's
+    /// position, panicking if it's uninitialized.
+    fn push_delimiter_current_start(&mut self, delimiter: Delimiter) {
+        let start = self.current_start();
+        self.stack.push((start, delimiter));
+    }
     /// Pushes a delimiter to the stack at a future token's position,
     /// using the current token's end position if it does not exist.
     fn push_delimiter_future_start(&mut self, delimiter: Delimiter) {
@@ -375,7 +381,7 @@ impl<'a> LexWithLayout<'a> {
                 {
                     self.queue.push_front(Token::layout_separator(token));
                     if let Delimiter::Of = delimiter {
-                        self.stack.push((token, Delimiter::CaseBinders));
+                        self.push_delimiter_current_start(Delimiter::CaseBinders);
                     }
                 }
             }
@@ -663,12 +669,12 @@ impl<'a> LexWithLayout<'a> {
                 self.collapse_mut(|_, delimiter| delimiter.is_indented());
                 self.queue_current();
                 if let Some((_, Brace)) = self.stack.last() {
-                    self.stack.push((self.current_start(), Property));
+                    self.push_delimiter_current_start(Property);
                 }
             }
             symbol_name!("[") => {
                 self.queue_current_default();
-                self.stack.push((self.current_start(), Square));
+                self.push_delimiter_current_start(Square);
             }
             symbol_name!("]") => {
                 self.collapse_mut(|_, delimiter| delimiter.is_indented());
@@ -679,7 +685,7 @@ impl<'a> LexWithLayout<'a> {
             }
             symbol_name!("(") => {
                 self.queue_current_default();
-                self.stack.push((self.current_start(), Parenthesis));
+                self.push_delimiter_current_start(Parenthesis);
             }
             symbol_name!(")") => {
                 self.collapse_mut(|_, delimiter| delimiter.is_indented());
@@ -690,8 +696,8 @@ impl<'a> LexWithLayout<'a> {
             }
             symbol_name!("{") => {
                 self.queue_current_default();
-                self.stack.push((self.current_start(), Brace));
-                self.stack.push((self.current_start(), Property));
+                self.push_delimiter_current_start(Brace);
+                self.push_delimiter_current_start(Property);
             }
             symbol_name!("}") => {
                 self.collapse_mut(|_, delimiter| delimiter.is_indented());
