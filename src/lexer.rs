@@ -69,6 +69,7 @@ impl<'a> Token<'a> {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Delimiter {
     Ado,
+    Brace,
     Case,
     CaseBinders,
     CaseGuard,
@@ -77,7 +78,10 @@ pub enum Delimiter {
     LetExpression,
     LetStatement,
     Of,
+    Parenthesis,
+    Property,
     Root,
+    Square,
     Top,
     Where,
 }
@@ -92,7 +96,8 @@ impl Delimiter {
         use Delimiter::*;
 
         match self {
-            Root | Top | Case | CaseBinders | CaseGuard | DeclarationGuard => false,
+            Root | Top | Brace | Case | CaseBinders | CaseGuard | DeclarationGuard
+            | Parenthesis | Property | Square => false,
             LetExpression | LetStatement | Where | Do | Ado | Of => true,
         }
     }
@@ -432,6 +437,12 @@ impl<'a> LexWithLayout<'a> {
 
         match self.current_kind() {
             lower_name!("let") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 self.queue_current_default();
                 // `let` in `do`/`ado` is a statement.
                 let delimiter = match self.stack.last() {
@@ -445,6 +456,12 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_start(delimiter);
             }
             lower_name!("where") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 let token = self.current_start();
                 // `where` ends the following contexts:
                 // 1. `do` blocks
@@ -459,14 +476,32 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_start(Where);
             }
             lower_name!("do") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 self.queue_current();
                 self.insert_start(Do);
             }
             lower_name!("ado") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 self.queue_current();
                 self.insert_start(Ado);
             }
             lower_name!("in") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 // `in` ends any indented delimiter except for `Ado`
                 // or a `LetExpression` since we handle them manually.
                 let (stack_size, end_count) = self.collapse(|_, delimiter| match delimiter {
@@ -510,10 +545,22 @@ impl<'a> LexWithLayout<'a> {
                 self.queue_current();
             }
             lower_name!("case") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 self.queue_current_default();
                 self.push_delimiter_future_start(Case);
             }
             lower_name!("of") => {
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                    self.queue_current();
+                    return;
+                }
+
                 // end all indented delimiters likely after `case`.
                 let (stack_size, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
 
@@ -614,6 +661,46 @@ impl<'a> LexWithLayout<'a> {
             }
             symbol_name!(",") => {
                 self.collapse_mut(|_, delimiter| delimiter.is_indented());
+                self.queue_current();
+                if let Some((_, Brace)) = self.stack.last() {
+                    self.stack.push((self.current_start(), Property));
+                }
+            }
+            symbol_name!("[") => {
+                self.queue_current_default();
+                self.stack.push((self.current_start(), Square));
+            }
+            symbol_name!("]") => {
+                self.collapse_mut(|_, delimiter| delimiter.is_indented());
+                if let Some((_, Square)) = self.stack.last() {
+                    self.stack.pop();
+                }
+                self.queue_current();
+            }
+            symbol_name!("(") => {
+                self.queue_current_default();
+                self.stack.push((self.current_start(), Parenthesis));
+            }
+            symbol_name!(")") => {
+                self.collapse_mut(|_, delimiter| delimiter.is_indented());
+                if let Some((_, Parenthesis)) = self.stack.last() {
+                    self.stack.pop();
+                }
+                self.queue_current();
+            }
+            symbol_name!("{") => {
+                self.queue_current_default();
+                self.stack.push((self.current_start(), Brace));
+                self.stack.push((self.current_start(), Property));
+            }
+            symbol_name!("}") => {
+                self.collapse_mut(|_, delimiter| delimiter.is_indented());
+                if let Some((_, Property)) = self.stack.last() {
+                    self.stack.pop();
+                }
+                if let Some((_, Brace)) = self.stack.last() {
+                    self.stack.pop();
+                }
                 self.queue_current();
             }
             _ => {
