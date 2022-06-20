@@ -115,7 +115,7 @@ macro_rules! symbol_name {
     };
 }
 
-pub fn lex<'a>(source: &'a str) -> Result<LexWithLayout<'a>, Error<Rule>> {
+pub fn lex(source: &str) -> Result<LexWithLayout, Error<Rule>> {
     let pairs = Grammar::parse(Rule::tokens, source)?.flatten().peekable();
     Ok(LexWithLayout::new(source, pairs))
 }
@@ -617,11 +617,8 @@ impl<'a> LexWithLayout<'a> {
             symbol_name!("=") => {
                 // `=` always collapses `LetExpression`,
                 // `LetStatement`, and `Where`.
-                let (stack_end, end_count) = self.collapse(|_, delimiter| match delimiter {
-                    LetExpression => true,
-                    LetStatement => true,
-                    Where => true,
-                    _ => false,
+                let (stack_end, end_count) = self.collapse(|_, delimiter| {
+                    matches!(delimiter, LetExpression | LetStatement | Where)
                 });
 
                 match &self.stack[..stack_end] {
