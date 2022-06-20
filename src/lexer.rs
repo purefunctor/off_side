@@ -104,7 +104,7 @@ impl Delimiter {
 }
 
 macro_rules! lower_name {
-    ($name:expr) => {
+    ($name:pat) => {
         TokenKind::LowerName($name)
     };
 }
@@ -441,14 +441,20 @@ impl<'a> LexWithLayout<'a> {
     fn next_with_layout(&mut self) {
         use Delimiter::*;
 
+        // if we're currently inside record syntax, make sure that
+        // hard syntax names are inserted without layout rules.
+        if let Some((_, Property)) = self.stack.last() {
+            if let lower_name!("let" | "where" | "do" | "ado" | "in" | "case" | "of") =
+                self.current_kind()
+            {
+                self.stack.pop();
+                self.queue_current();
+                return;
+            }
+        }
+
         match self.current_kind() {
             lower_name!("let") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 self.queue_current_default();
                 // `let` in `do`/`ado` is a statement.
                 let delimiter = match self.stack.last() {
@@ -462,12 +468,6 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_start(delimiter);
             }
             lower_name!("where") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 let token = self.current_start();
                 // `where` ends the following contexts:
                 // 1. `do` blocks
@@ -482,32 +482,14 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_start(Where);
             }
             lower_name!("do") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 self.queue_current();
                 self.insert_start(Do);
             }
             lower_name!("ado") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 self.queue_current();
                 self.insert_start(Ado);
             }
             lower_name!("in") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 // `in` ends any indented delimiter except for `Ado`
                 // or a `LetExpression` since we handle them manually.
                 let (stack_size, end_count) = self.collapse(|_, delimiter| match delimiter {
@@ -551,22 +533,10 @@ impl<'a> LexWithLayout<'a> {
                 self.queue_current();
             }
             lower_name!("case") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 self.queue_current_default();
                 self.push_delimiter_future_start(Case);
             }
             lower_name!("of") => {
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                    self.queue_current();
-                    return;
-                }
-
                 // end all indented delimiters likely after `case`.
                 let (stack_size, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
 
