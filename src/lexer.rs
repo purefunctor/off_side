@@ -84,6 +84,8 @@ pub enum Delimiter {
     Square,
     Top,
     Where,
+    If,
+    Then,
 }
 
 impl Delimiter {
@@ -96,8 +98,8 @@ impl Delimiter {
         use Delimiter::*;
 
         match self {
-            Root | Top | Brace | Case | CaseBinders | CaseGuard | DeclarationGuard
-            | Parenthesis | Property | Square => false,
+            Root | Top | Brace | Case | CaseBinders | CaseGuard | DeclarationGuard | If
+            | Parenthesis | Property | Square | Then => false,
             LetExpression | LetStatement | Where | Do | Ado | Of => true,
         }
     }
@@ -444,8 +446,9 @@ impl<'a> LexWithLayout<'a> {
         // if we're currently inside record syntax, make sure that
         // hard syntax names are inserted without layout rules.
         if let Some((_, Property)) = self.stack.last() {
-            if let lower_name!("let" | "where" | "do" | "ado" | "in" | "case" | "of") =
-                self.current_kind()
+            if let lower_name!(
+                "let" | "where" | "do" | "ado" | "in" | "case" | "of" | "if" | "then" | "else"
+            ) = self.current_kind()
             {
                 self.stack.pop();
                 self.queue_current();
@@ -556,6 +559,39 @@ impl<'a> LexWithLayout<'a> {
                         self.discard_delimiter_n(stack_size);
                         self.queue_n_layout_end(end_count);
                         self.queue_current_default();
+                    }
+                }
+            }
+            lower_name!("if") => {
+                self.queue_current_default();
+                self.push_delimiter_current_start(If);
+            }
+            lower_name!("then") => {
+                let (stack_end, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
+
+                match &self.stack[..stack_end] {
+                    [.., (_, If)] => {
+                        self.discard_delimiter_n(stack_end.saturating_sub(1));
+                        self.queue_n_layout_end(end_count);
+                        self.queue_current();
+                        self.push_delimiter_current_start(Then);
+                    }
+                    _ => {
+                        self.queue_current_default();
+                    }
+                }
+            }
+            lower_name!("else") => {
+                let (stack_end, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
+
+                match &self.stack[..stack_end] {
+                    [.., (_, Then)] => {
+                        self.discard_delimiter_n(stack_end.saturating_sub(1));
+                        self.queue_n_layout_end(end_count);
+                        self.queue_current();
+                    }
+                    _ => {
+                        unimplemented!("instance chains!");
                     }
                 }
             }
