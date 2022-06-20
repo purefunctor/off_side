@@ -96,12 +96,7 @@ impl Delimiter {
 
     pub fn is_indented(&self) -> bool {
         use Delimiter::*;
-
-        match self {
-            Root | Top | Brace | Case | CaseBinders | CaseGuard | DeclarationGuard | If
-            | Parenthesis | Property | Square | Then => false,
-            LetExpression | LetStatement | Where | Do | Ado | Of => true,
-        }
+        matches!(self, Ado | Do | Of | LetExpression | LetStatement | Where)
     }
 }
 
