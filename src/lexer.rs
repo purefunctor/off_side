@@ -586,7 +586,19 @@ impl<'a> LexWithLayout<'a> {
                         self.queue_current();
                     }
                     _ => {
-                        unimplemented!("instance chains!");
+                        let token = self.current_start();
+                        self.collapse_mut(|position, delimiter| {
+                            delimiter.is_indented() && token.column < position.column
+                        });
+                        if let [(_, Root), (_, Where)] = &self.stack[..] {
+                            self.queue_current();
+                        } else {
+                            self.insert_seperator();
+                            self.queue_current();
+                            if let Some((_, Property)) = self.stack.last() {
+                                self.stack.pop();
+                            }
+                        }
                     }
                 }
             }
