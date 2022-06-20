@@ -555,6 +555,16 @@ impl<'a> LexWithLayout<'a> {
                         self.push_delimiter_future_start(CaseGuard);
                         self.queue_current();
                     }
+                    [.., (_, LetExpression | LetStatement | Where)] => {
+                        self.discard_delimiter_n(stack_end);
+                        self.queue_n_layout_end(end_count);
+                        // `DeclarationGuard` essentially hides their
+                        // delimiters above from being eliminated by
+                        // a collapse. After a `=` is encountered, the
+                        // underlying delimiters are revealed.
+                        self.push_delimiter_future_start(DeclarationGuard);
+                        self.queue_current();
+                    }
                     _ => {
                         self.discard_delimiter_n(stack_end);
                         self.queue_n_layout_end(end_count);
@@ -579,6 +589,31 @@ impl<'a> LexWithLayout<'a> {
                 if let Some((_, CaseGuard | CaseBinders)) = self.stack.last() {
                     self.stack.pop();
                 }
+                self.queue_current();
+            }
+            symbol_name!("=") => {
+                // `=` always collapses `LetExpression`,
+                // `LetStatement`, and `Where`.
+                let (stack_end, end_count) = self.collapse(|_, delimiter| match delimiter {
+                    LetExpression => true,
+                    LetStatement => true,
+                    Where => true,
+                    _ => false,
+                });
+
+                match &self.stack[..stack_end] {
+                    [.., (_, DeclarationGuard)] => {
+                        self.discard_delimiter_n(stack_end);
+                        self.queue_n_layout_end(end_count);
+                        self.queue_current();
+                    }
+                    _ => {
+                        self.queue_current_default();
+                    }
+                }
+            }
+            symbol_name!(",") => {
+                self.collapse_mut(|_, delimiter| delimiter.is_indented());
                 self.queue_current();
             }
             _ => {
