@@ -86,6 +86,7 @@ pub enum Delimiter {
     Where,
     If,
     Then,
+    LambdaBinders,
 }
 
 impl Delimiter {
@@ -271,21 +272,10 @@ impl<'a> LexWithLayout<'a> {
     }
     /// Pushes the current token to the queue, panicking if it's
     /// uninitialized.
-    fn queue_current(&mut self) {
+    fn insert_current(&mut self) {
         match self.current {
             Some(current) => self.queue.push_front(current),
             None => panic!("current token is uninitialized"),
-        }
-    }
-    /// Truncates the delimiter stack to `n` elements.
-    fn discard_delimiter_n(&mut self, value: usize) {
-        self.stack.truncate(value);
-    }
-    /// Pushes `n` `LayoutEnd` tokens to the queue.
-    fn queue_n_layout_end(&mut self, value: usize) {
-        for _ in 0..value {
-            self.queue
-                .push_front(Token::layout_end(self.current_start()))
         }
     }
 }
@@ -310,33 +300,15 @@ impl<'a> LexWithLayout<'a> {
         for (position, delimiter) in self.stack.iter().rev() {
             if predicate(position, delimiter) {
                 take_n = take_n.saturating_sub(1);
-                make_n += 1;
+                if delimiter.is_indented() {
+                    make_n += 1;
+                }
             } else {
                 break;
             }
         }
 
         (take_n, make_n)
-    }
-    /// A version of `collapse` that alsp performs the associated
-    /// mutations.
-    fn collapse_mut<F>(&mut self, predicate: F)
-    where
-        F: Fn(&Position, &Delimiter) -> bool,
-    {
-        let (take_n, make_n) = self.collapse(predicate);
-        self.discard_delimiter_n(take_n);
-        self.queue_n_layout_end(make_n);
-    }
-    /// A version of `collapse` that discards delimiters if they
-    /// introduce an indentation context and the current token is
-    /// dedented past them, effectively ending said indentation
-    /// context.
-    fn collapse_offside(&mut self) {
-        let token = self.current_start();
-        self.collapse_mut(|position, delimiter| {
-            delimiter.is_indented() && token.column < position.column
-        });
     }
     /// Pushes a `LayoutStart` token to the queue and a provided
     /// delimiter to the delimiter stack if a future token is indented
@@ -385,12 +357,18 @@ impl<'a> LexWithLayout<'a> {
             _ => {}
         }
     }
-    /// Pushes the current token to the queue after running
-    /// `collapse_offside` and `insert_separator`.
-    fn queue_current_default(&mut self) {
-        self.collapse_offside();
+    /// Pushes the current token after collapsing the layout.
+    fn collapse_and_insert_current(&mut self) {
+        let (take_n, make_n) = self.collapse(|position, delimiter| {
+            delimiter.is_indented() && self.current_start().column < position.column
+        });
+        self.stack.truncate(take_n);
+        for _ in 0..make_n {
+            self.queue
+                .push_front(Token::layout_end(self.current_start()));
+        }
         self.insert_seperator();
-        self.queue_current();
+        self.insert_current();
     }
     /// Discards all remaining elements from the layout stack while
     /// pushing the appropriate amount of `LayoutEnd` and `Eof` tokens
@@ -424,6 +402,7 @@ impl<'a> LexWithLayout<'a> {
                 Rule::lower_name => LowerName(slice),
                 Rule::symbol_name => SymbolName(slice),
                 Rule::digit_value => LiteralInteger(slice),
+                Rule::paren_name => SymbolName(slice),
                 Rule::EOI => Eof,
                 rule => unreachable!("unhandled rule {:?}", rule),
             },
@@ -438,23 +417,47 @@ impl<'a> LexWithLayout<'a> {
     fn next_with_layout(&mut self) {
         use Delimiter::*;
 
-        // if we're currently inside record syntax, make sure that
-        // hard syntax names are inserted without layout rules.
-        if let Some((_, Property)) = self.stack.last() {
-            if let lower_name!(
-                "let" | "where" | "do" | "ado" | "in" | "case" | "of" | "if" | "then" | "else"
-            ) = self.current_kind()
-            {
-                self.stack.pop();
-                self.queue_current();
-                return;
-            }
+        // a convenience macro that pattern matches against the result
+        // of a `collapse`, making sure that the required post-collapse
+        // operations are run before doing anything else.
+        //
+        // the boolean `commit` determines whether or not to mutate
+        // the delimiter stack and the token queue.
+        macro_rules! collapse {
+            ($predicate:expr, $($commit:literal ~ $pattern:pat $(if $guard:expr)? => $expression:expr,)+) => {
+                {
+                    let (stack_n, layout_m) = self.collapse($predicate);
+                    match &self.stack[..stack_n] {
+                        $($pattern $(if $guard)? => {
+                            if $commit {
+                                self.stack.truncate(stack_n);
+                                for _ in 0..layout_m {
+                                    self.queue.push_front(Token::layout_end(self.current_start()));
+                                }
+                            };
+                            $expression
+                        }),+
+                    }
+                }
+            };
+        }
+
+        macro_rules! insert_keyword {
+            ($else:expr) => {
+                match self.stack.last() {
+                    Some((_, Property)) => {
+                        self.stack.pop();
+                        self.insert_current();
+                    }
+                    _ => $else,
+                }
+            };
         }
 
         match self.current_kind() {
-            lower_name!("let") => {
-                self.queue_current_default();
-                // `let` in `do`/`ado` is a statement.
+            lower_name!("let") => insert_keyword!({
+                self.collapse_and_insert_current();
+
                 let delimiter = match self.stack.last() {
                     Some((position, Do | Ado))
                         if self.current_start().column == position.column =>
@@ -463,264 +466,251 @@ impl<'a> LexWithLayout<'a> {
                     }
                     _ => LetExpression,
                 };
-                self.insert_start(delimiter);
-            }
-            lower_name!("where") => {
-                let token = self.current_start();
-                // `where` ends the following contexts:
-                // 1. `do` blocks
-                // 2. any delimiter with an indentation context _and_
-                //    whose position aligns with, or is greater than
-                //    the current token.
-                self.collapse_mut(|position, delimiter| {
-                    delimiter.is_do()
-                        || (delimiter.is_indented() && token.column <= position.column)
-                });
-                self.queue_current();
-                self.insert_start(Where);
-            }
-            lower_name!("do") => {
-                self.queue_current();
-                self.insert_start(Do);
-            }
-            lower_name!("ado") => {
-                self.queue_current();
-                self.insert_start(Ado);
-            }
-            lower_name!("in") => {
-                // `in` ends any indented delimiter except for `Ado`
-                // or a `LetExpression` since we handle them manually.
-                let (stack_size, end_count) = self.collapse(|_, delimiter| match delimiter {
-                    Ado | LetExpression => false,
-                    _ => delimiter.is_indented(),
-                });
 
-                match &self.stack[..stack_size] {
-                    // 1. this is run when a `LetExpression` is used
-                    // inside of a `LetStatement` in an `Ado` block,
-                    // like so:
+                self.insert_start(delimiter);
+            }),
+            lower_name!("where") => insert_keyword!({
+                collapse!(
+                    |position, delimiter| {
+                        delimiter.is_do() || (delimiter.is_indented() && self.current_start().column <= position.column)
+                    },
+                    true ~ _ => {
+                        self.insert_current();
+                        self.insert_start(Where);
+                    },
+                );
+            }),
+            lower_name!("do") => insert_keyword!({
+                self.collapse_and_insert_current();
+                self.insert_start(Do);
+            }),
+            lower_name!("ado") => insert_keyword!({
+                self.collapse_and_insert_current();
+                self.insert_start(Ado);
+            }),
+            lower_name!("in") => {
+                collapse!(
+                    // collapse delimiters that introduce an indented
+                    // context until we find `Ado` or `LetExpression`,
+                    // since we manually handle them below.
+                    |_, delimiter| match delimiter {
+                        Ado | LetExpression => false,
+                        _ => delimiter.is_indented(),
+                    },
+
+                    // this is encountered when a `LetExpression` is
+                    // used inside of a `LetStatement` in an `Ado`
+                    // block.
                     //
                     // ```hs
                     // test = ado
                     //   let a = let b = c in c
                     //   in a
                     // ```
-                    [.., (_, Ado), (_, LetStatement)] => {
-                        // `in` terminates the whole `Ado` block, so
-                        // we include them when truncating the stack
-                        // and pushing layout tokens.
-                        self.discard_delimiter_n(stack_size.saturating_sub(2));
-                        self.queue_n_layout_end(end_count + 2)
-                    }
-                    // 2. this is run when any delimiter that
-                    // introduces an indentation context is
-                    // encountered; this also essentially catches
-                    // `Ado` blocks w/o the specialization seen above.
-                    [.., (_, delimiter)] if delimiter.is_indented() => {
-                        self.discard_delimiter_n(stack_size.saturating_sub(1));
-                        self.queue_n_layout_end(end_count + 1);
-                    }
-                    // 3. fallthrough; this just collapses everything
-                    // "normally" and inserts a separator before the
-                    // current token.
-                    _ => {
-                        self.collapse_offside();
-                        self.insert_seperator();
-                    }
-                }
-                self.queue_current();
+                    //
+                    // into:
+                    //
+                    // ```hs
+                    // test = ado{
+                    //   let {a = let {b = c} in c}}
+                    //   in a
+                    // ```
+                    true ~ [.., (_, Ado), (_, LetStatement)] => {
+                        self.stack.pop();
+                        self.stack.pop();
+                        self.queue.push_front(Token::layout_end(self.current_start()));
+                        self.queue.push_front(Token::layout_end(self.current_start()));
+                        self.insert_current();
+                    },
+
+                    // this is a fallthrough for all other delimiters
+                    // that have to be collapsed, such as a
+                    // `LetExpression`.
+                    true ~ [.., (_, delimiter)] if delimiter.is_indented() => {
+                        self.stack.pop();
+                        self.queue.push_front(Token::layout_end(self.current_start()));
+                        self.insert_current();
+                    },
+
+                    // if there's no more delimiters to be collapsed,
+                    // we just run the default insertion operations
+                    // and remove `Property` if we're inside record
+                    // syntax.
+                    false ~ _ => insert_keyword!({
+                        self.collapse_and_insert_current();
+                    }),
+                );
             }
-            lower_name!("case") => {
-                self.queue_current_default();
-                self.push_delimiter_future_start(Case);
-            }
+            lower_name!("case") => insert_keyword!({
+                self.collapse_and_insert_current();
+                self.push_delimiter_current_start(Case);
+            }),
             lower_name!("of") => {
-                // end all indented delimiters likely after `case`.
-                let (stack_size, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
-
-                match &self.stack[..stack_size] {
-                    [.., (_, Case)] => {
-                        self.discard_delimiter_n(stack_size.saturating_sub(1));
-                        self.queue_n_layout_end(end_count);
-                        self.queue_current();
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ [.., (_, Case)] => {
+                        self.stack.pop();
+                        self.insert_current();
                         self.insert_start(Of);
-                        // `CaseBinders` essentially "hides" `Of` from
-                        // being eliminated by a collapse. After a
-                        // `->` is encountered, the underlying `Of` is
-                        // revealed.
                         self.push_delimiter_future_start(CaseBinders);
-                    }
-                    _ => {
-                        self.discard_delimiter_n(stack_size);
-                        self.queue_n_layout_end(end_count);
-                        self.queue_current_default();
-                    }
-                }
+                    },
+                    true ~ _ => insert_keyword!({
+                        self.collapse_and_insert_current();
+                    }),
+                )
             }
-            lower_name!("if") => {
-                self.queue_current_default();
+            lower_name!("if") => insert_keyword!({
+                self.collapse_and_insert_current();
                 self.push_delimiter_current_start(If);
-            }
+            }),
             lower_name!("then") => {
-                let (stack_end, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
-
-                match &self.stack[..stack_end] {
-                    [.., (_, If)] => {
-                        self.discard_delimiter_n(stack_end.saturating_sub(1));
-                        self.queue_n_layout_end(end_count);
-                        self.queue_current();
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ [.., (_, If)] => {
+                        self.stack.pop();
+                        self.insert_current();
                         self.push_delimiter_current_start(Then);
-                    }
-                    _ => {
-                        self.queue_current_default();
-                    }
-                }
+                    },
+                    false ~ _ => insert_keyword!({
+                        self.collapse_and_insert_current();
+                    }),
+                )
             }
             lower_name!("else") => {
-                let (stack_end, end_count) = self.collapse(|_, delimiter| delimiter.is_indented());
-
-                match &self.stack[..stack_end] {
-                    [.., (_, Then)] => {
-                        self.discard_delimiter_n(stack_end.saturating_sub(1));
-                        self.queue_n_layout_end(end_count);
-                        self.queue_current();
-                    }
-                    _ => {
-                        let token = self.current_start();
-                        self.collapse_mut(|position, delimiter| {
-                            delimiter.is_indented() && token.column < position.column
-                        });
-                        if let [(_, Root), (_, Where)] = &self.stack[..] {
-                            self.queue_current();
-                        } else {
-                            self.insert_seperator();
-                            self.queue_current();
-                            if let Some((_, Property)) = self.stack.last() {
-                                self.stack.pop();
-                            }
-                        }
-                    }
-                }
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ [.., (_, Then)] => {
+                        self.stack.pop();
+                        self.insert_current();
+                    },
+                    false ~ _ => {
+                        collapse!(
+                            |position, delimiter| {
+                                delimiter.is_indented() && self.current_start().column < position.column
+                            },
+                            true ~ [(_, Root), (_, Where)] => {
+                                self.insert_current();
+                            },
+                            true ~ _ => {
+                                self.insert_seperator();
+                                insert_keyword!({
+                                    self.insert_current();
+                                });
+                            },
+                        )
+                    },
+                );
             }
             symbol_name!("|") => {
-                // end all indented delimiters if the current token is
-                // also dedented past said delimiter.
-                let token = self.current_start();
-                let (stack_end, end_count) = self.collapse(|position, delimiter| {
-                    delimiter.is_indented() && token.column <= position.column
-                });
-
-                match &self.stack[..stack_end] {
-                    [.., (_, Of)] => {
-                        self.discard_delimiter_n(stack_end);
-                        self.queue_n_layout_end(end_count);
-                        // `CaseGuard` essentially "hides" `Of` from
-                        // being eliminated by a collapse. After a
-                        // `->` is encountered, the underlying `Of` is
-                        // revealed.
+                collapse!(
+                    |position, delimiter| {
+                        delimiter.is_indented() && self.current_start().column <= position.column
+                    },
+                    true ~ [.., (_, Of)] => {
                         self.push_delimiter_future_start(CaseGuard);
-                        self.queue_current();
-                    }
-                    [.., (_, LetExpression | LetStatement | Where)] => {
-                        self.discard_delimiter_n(stack_end);
-                        self.queue_n_layout_end(end_count);
-                        // `DeclarationGuard` essentially hides their
-                        // delimiters above from being eliminated by
-                        // a collapse. After a `=` is encountered, the
-                        // underlying delimiters are revealed.
+                        self.insert_current();
+                    },
+                    true ~ [.., (_, LetExpression | LetStatement | Where)] => {
                         self.push_delimiter_future_start(DeclarationGuard);
-                        self.queue_current();
-                    }
-                    _ => {
-                        self.discard_delimiter_n(stack_end);
-                        self.queue_n_layout_end(end_count);
-                        self.queue_current_default();
-                    }
-                }
+                        self.insert_current();
+                    },
+                    true ~ _ => insert_keyword!({
+                        self.collapse_and_insert_current();
+                    }),
+                );
             }
             symbol_name!("->") => {
-                // 1. `->` always ends `Do`
-                // 2. `->` never ends `Of`
-                // 3. `->` ends indented delimiters if the current
-                // token is also dedented past said delimiter.
-                let token = self.current_start();
-                self.collapse_mut(|position, delimiter| match delimiter {
-                    Do => true,
-                    Of => false,
-                    _ => delimiter.is_indented() && token.column <= position.column,
-                });
-                // `->` elimjnates certain delimiters, which then
-                // exposes the ones which can be eliminated through a
-                // collapse.
-                if let Some((_, CaseGuard | CaseBinders)) = self.stack.last() {
-                    self.stack.pop();
-                }
-                self.queue_current();
+                collapse!(
+                    |position, delimiter| match delimiter {
+                        Do => true,
+                        Of => false,
+                        _ => delimiter.is_indented() && self.current_start().column <= position.column,
+                    },
+                    true ~ _ => {
+                        self.insert_current();
+                        if let Some((_, CaseGuard | CaseBinders | LambdaBinders)) = self.stack.last() {
+                            self.stack.pop();
+                        }
+                    },
+                );
             }
             symbol_name!("=") => {
-                // `=` always collapses `LetExpression`,
-                // `LetStatement`, and `Where`.
-                let (stack_end, end_count) = self.collapse(|_, delimiter| {
-                    matches!(delimiter, LetExpression | LetStatement | Where)
-                });
-
-                match &self.stack[..stack_end] {
-                    [.., (_, DeclarationGuard)] => {
-                        self.discard_delimiter_n(stack_end);
-                        self.queue_n_layout_end(end_count);
-                        self.queue_current();
-                    }
-                    _ => {
-                        self.queue_current_default();
-                    }
-                }
+                collapse!(
+                    |_, delimiter| matches!(delimiter, LetExpression | LetStatement | Where),
+                    true ~ [.., (_, DeclarationGuard)] => {
+                        self.insert_current();
+                    },
+                    false ~ _ => {
+                        self.collapse_and_insert_current();
+                    },
+                );
             }
             symbol_name!(",") => {
-                self.collapse_mut(|_, delimiter| delimiter.is_indented());
-                self.queue_current();
-                if let Some((_, Brace)) = self.stack.last() {
-                    self.push_delimiter_current_start(Property);
-                }
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ _ => {
+                        self.insert_current();
+                        if let Some((_, Brace)) = self.stack.last() {
+                            self.push_delimiter_current_start(Property);
+                        }
+                    },
+                );
+            }
+            symbol_name!("\\") => {
+                self.collapse_and_insert_current();
+                self.push_delimiter_current_start(LambdaBinders);
             }
             symbol_name!("[") => {
-                self.queue_current_default();
+                self.collapse_and_insert_current();
                 self.push_delimiter_current_start(Square);
             }
             symbol_name!("]") => {
-                self.collapse_mut(|_, delimiter| delimiter.is_indented());
-                if let Some((_, Square)) = self.stack.last() {
-                    self.stack.pop();
-                }
-                self.queue_current();
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ _ => {
+                        self.insert_current();
+                        if let Some((_, Square)) = self.stack.last() {
+                            self.stack.pop();
+                        }
+                    },
+                );
             }
             symbol_name!("(") => {
-                self.queue_current_default();
+                self.collapse_and_insert_current();
                 self.push_delimiter_current_start(Parenthesis);
             }
             symbol_name!(")") => {
-                self.collapse_mut(|_, delimiter| delimiter.is_indented());
-                if let Some((_, Parenthesis)) = self.stack.last() {
-                    self.stack.pop();
-                }
-                self.queue_current();
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ _ => {
+                        self.insert_current();
+                        if let Some((_, Parenthesis)) = self.stack.last() {
+                            self.stack.pop();
+                        }
+                    },
+                );
             }
             symbol_name!("{") => {
-                self.queue_current_default();
+                self.collapse_and_insert_current();
                 self.push_delimiter_current_start(Brace);
                 self.push_delimiter_current_start(Property);
             }
             symbol_name!("}") => {
-                self.collapse_mut(|_, delimiter| delimiter.is_indented());
-                if let Some((_, Property)) = self.stack.last() {
-                    self.stack.pop();
-                }
-                if let Some((_, Brace)) = self.stack.last() {
-                    self.stack.pop();
-                }
-                self.queue_current();
+                collapse!(
+                    |_, delimiter| delimiter.is_indented(),
+                    true ~ _ => {
+                        self.insert_current();
+                        if let Some((_, Property)) = self.stack.last() {
+                            self.stack.pop();
+                        }
+                        if let Some((_, Brace)) = self.stack.last() {
+                            self.stack.pop();
+                        }
+                    },
+                );
             }
             _ => {
-                self.queue_current_default();
+                self.collapse_and_insert_current();
             }
         }
     }
