@@ -15,7 +15,16 @@ upper_name = @{
 }
 
 symbol_name = @{
-      ( PUNCTUATION | SYMBOL )+
+      !paren_name ~ ( PUNCTUATION | SYMBOL )+
+}
+
+paren_name = {
+      "("
+    | ")"
+    | "["
+    | "]"
+    | "{"
+    | "}"
 }
 
 digit_value = @{
@@ -26,6 +35,7 @@ token = _{
       lower_name
     | upper_name
     | symbol_name
+    | paren_name
     | digit_value
 }
 
