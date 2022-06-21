@@ -260,13 +260,13 @@ impl<'a> LexWithLayout<'a> {
 impl<'a> LexWithLayout<'a> {
     /// Pushes a delimiter to the stack at the current token's
     /// position, panicking if it's uninitialized.
-    fn push_delimiter_current_start(&mut self, delimiter: Delimiter) {
+    fn push_current_start(&mut self, delimiter: Delimiter) {
         let start = self.current_start();
         self.stack.push((start, delimiter));
     }
     /// Pushes a delimiter to the stack at a future token's position,
     /// using the current token's end position if it does not exist.
-    fn push_delimiter_future_start(&mut self, delimiter: Delimiter) {
+    fn push_future_start(&mut self, delimiter: Delimiter) {
         let start = self.future_start();
         self.stack.push((start, delimiter));
     }
@@ -350,7 +350,7 @@ impl<'a> LexWithLayout<'a> {
                 {
                     self.queue.push_front(Token::layout_separator(token));
                     if let Delimiter::Of = delimiter {
-                        self.push_delimiter_current_start(Delimiter::CaseBinders);
+                        self.push_current_start(Delimiter::CaseBinders);
                     }
                 }
             }
@@ -543,7 +543,7 @@ impl<'a> LexWithLayout<'a> {
             }
             lower_name!("case") => insert_keyword!({
                 self.collapse_and_insert_current();
-                self.push_delimiter_current_start(Case);
+                self.push_current_start(Case);
             }),
             lower_name!("of") => {
                 collapse!(
@@ -552,7 +552,7 @@ impl<'a> LexWithLayout<'a> {
                         self.stack.pop();
                         self.insert_current();
                         self.insert_start(Of);
-                        self.push_delimiter_future_start(CaseBinders);
+                        self.push_future_start(CaseBinders);
                     },
                     true ~ _ => insert_keyword!({
                         self.collapse_and_insert_current();
@@ -561,7 +561,7 @@ impl<'a> LexWithLayout<'a> {
             }
             lower_name!("if") => insert_keyword!({
                 self.collapse_and_insert_current();
-                self.push_delimiter_current_start(If);
+                self.push_current_start(If);
             }),
             lower_name!("then") => {
                 collapse!(
@@ -569,7 +569,7 @@ impl<'a> LexWithLayout<'a> {
                     true ~ [.., (_, If)] => {
                         self.stack.pop();
                         self.insert_current();
-                        self.push_delimiter_current_start(Then);
+                        self.push_current_start(Then);
                     },
                     false ~ _ => insert_keyword!({
                         self.collapse_and_insert_current();
@@ -607,11 +607,11 @@ impl<'a> LexWithLayout<'a> {
                         delimiter.is_indented() && self.current_start().column <= position.column
                     },
                     true ~ [.., (_, Of)] => {
-                        self.push_delimiter_future_start(CaseGuard);
+                        self.push_future_start(CaseGuard);
                         self.insert_current();
                     },
                     true ~ [.., (_, LetExpression | LetStatement | Where)] => {
-                        self.push_delimiter_future_start(DeclarationGuard);
+                        self.push_future_start(DeclarationGuard);
                         self.insert_current();
                     },
                     true ~ _ => insert_keyword!({
@@ -651,18 +651,18 @@ impl<'a> LexWithLayout<'a> {
                     true ~ _ => {
                         self.insert_current();
                         if let Some((_, Brace)) = self.stack.last() {
-                            self.push_delimiter_current_start(Property);
+                            self.push_current_start(Property);
                         }
                     },
                 );
             }
             symbol_name!("\\") => {
                 self.collapse_and_insert_current();
-                self.push_delimiter_current_start(LambdaBinders);
+                self.push_current_start(LambdaBinders);
             }
             symbol_name!("[") => {
                 self.collapse_and_insert_current();
-                self.push_delimiter_current_start(Square);
+                self.push_current_start(Square);
             }
             symbol_name!("]") => {
                 collapse!(
@@ -677,7 +677,7 @@ impl<'a> LexWithLayout<'a> {
             }
             symbol_name!("(") => {
                 self.collapse_and_insert_current();
-                self.push_delimiter_current_start(Parenthesis);
+                self.push_current_start(Parenthesis);
             }
             symbol_name!(")") => {
                 collapse!(
@@ -692,8 +692,8 @@ impl<'a> LexWithLayout<'a> {
             }
             symbol_name!("{") => {
                 self.collapse_and_insert_current();
-                self.push_delimiter_current_start(Brace);
-                self.push_delimiter_current_start(Property);
+                self.push_current_start(Brace);
+                self.push_current_start(Property);
             }
             symbol_name!("}") => {
                 collapse!(
