@@ -196,9 +196,7 @@ impl<'a> LexWithLayout<'a> {
 
     /// Determines the line and column position of a given byte offset.
     fn get_position(&self, offset: usize) -> Position {
-        if offset > self.source.len() {
-            panic!("offset is greater than the source")
-        }
+        assert!(offset <= self.source.len(), "offset cannot be greater than source");
 
         // Find the closest line offset and its index
         let closest_index = self
