@@ -82,7 +82,8 @@ pub enum Delimiter {
     Property,
     Root,
     Square,
-    Top,
+    TopDeclaration,
+    TopDeclarationHead,
     Where,
     If,
     Then,
@@ -196,7 +197,10 @@ impl<'a> LexWithLayout<'a> {
 
     /// Determines the line and column position of a given byte offset.
     fn get_position(&self, offset: usize) -> Position {
-        assert!(offset <= self.source.len(), "offset cannot be greater than source");
+        assert!(
+            offset <= self.source.len(),
+            "offset cannot be greater than source"
+        );
 
         // Find the closest line offset and its index
         let closest_index = self
@@ -335,7 +339,7 @@ impl<'a> LexWithLayout<'a> {
     fn insert_seperator(&mut self) {
         let token = self.current_start();
         match self.stack.last() {
-            Some((position, Delimiter::Top)) => {
+            Some((position, Delimiter::TopDeclaration | Delimiter::TopDeclarationHead)) => {
                 if token.column == position.column && token.line != position.line {
                     self.stack.pop();
                     self.queue.push_front(Token::layout_separator(token));
@@ -453,6 +457,18 @@ impl<'a> LexWithLayout<'a> {
         }
 
         match self.current_kind() {
+            lower_name!("data") => insert_keyword!({
+                self.collapse_and_insert_current();
+                if let [(_, Root), (_, Where)] = &self.stack[..] {
+                    self.push_current_start(TopDeclaration);
+                }
+            }),
+            lower_name!("class") => insert_keyword!({
+                self.collapse_and_insert_current();
+                if let [(_, Root), (_, Where)] = &self.stack[..] {
+                    self.push_current_start(TopDeclarationHead);
+                }
+            }),
             lower_name!("let") => insert_keyword!({
                 self.collapse_and_insert_current();
 
@@ -468,15 +484,23 @@ impl<'a> LexWithLayout<'a> {
                 self.insert_start(delimiter);
             }),
             lower_name!("where") => insert_keyword!({
-                collapse!(
-                    |position, delimiter| {
-                        delimiter.is_do() || (delimiter.is_indented() && self.current_start().column <= position.column)
-                    },
-                    true ~ _ => {
+                match self.stack.last() {
+                    Some((_, TopDeclarationHead)) => {
                         self.insert_current();
                         self.insert_start(Where);
-                    },
-                );
+                    }
+                    _ => {
+                        collapse!(
+                            |position, delimiter| {
+                                delimiter.is_do() || (delimiter.is_indented() && self.current_start().column <= position.column)
+                            },
+                            true ~ _ => {
+                                self.insert_current();
+                                self.insert_start(Where);
+                            },
+                        );
+                    }
+                }
             }),
             lower_name!("do") => insert_keyword!({
                 self.collapse_and_insert_current();
