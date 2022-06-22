@@ -75,6 +75,7 @@ pub enum Delimiter {
     CaseGuard,
     DeclarationGuard,
     Do,
+    Forall,
     LetExpression,
     LetStatement,
     Of,
@@ -469,6 +470,10 @@ impl<'a> LexWithLayout<'a> {
                     self.push_current_start(TopDeclarationHead);
                 }
             }),
+            lower_name!("forall") => insert_keyword!({
+                self.insert_current();
+                self.push_current_start(Forall);
+            }),
             lower_name!("let") => insert_keyword!({
                 self.collapse_and_insert_current();
 
@@ -677,6 +682,14 @@ impl<'a> LexWithLayout<'a> {
                         }
                     },
                 );
+            }
+            symbol_name!(".") => {
+                self.collapse_and_insert_current();
+                if let Some((_, Forall)) = self.stack.last() {
+                    self.stack.pop();
+                } else {
+                    self.push_current_start(Property);
+                }
             }
             symbol_name!("\\") => {
                 self.collapse_and_insert_current();
