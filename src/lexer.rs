@@ -92,11 +92,6 @@ pub enum Delimiter {
 }
 
 impl Delimiter {
-    fn is_do(&self) -> bool {
-        use Delimiter::*;
-        matches!(self, Do)
-    }
-
     pub fn is_indented(&self) -> bool {
         use Delimiter::*;
         matches!(self, Ado | Do | Of | LetExpression | LetStatement | Where)
@@ -457,6 +452,14 @@ impl<'a> LexWithLayout<'a> {
             };
         }
 
+        macro_rules! pop_match {
+            ($pattern:pat) => {
+                if let Some((_, $pattern)) = self.stack.last() {
+                    self.stack.pop();
+                }
+            };
+        }
+
         match self.current_kind() {
             lower_name!("data") => insert_keyword!({
                 self.collapse_and_insert_current();
@@ -497,7 +500,10 @@ impl<'a> LexWithLayout<'a> {
                     _ => {
                         collapse!(
                             |position, delimiter| {
-                                delimiter.is_do() || (delimiter.is_indented() && self.current_start().column <= position.column)
+                                matches!(delimiter, Do) ||
+                                    ( delimiter.is_indented() &&
+                                      self.current_start().column <= position.column
+                                    )
                             },
                             true ~ _ => {
                                 self.insert_current();
@@ -655,9 +661,7 @@ impl<'a> LexWithLayout<'a> {
                     },
                     true ~ _ => {
                         self.insert_current();
-                        if let Some((_, CaseGuard | CaseBinders | LambdaBinders)) = self.stack.last() {
-                            self.stack.pop();
-                        }
+                        pop_match!(CaseGuard | CaseBinders | LambdaBinders);
                     },
                 );
             }
@@ -665,6 +669,7 @@ impl<'a> LexWithLayout<'a> {
                 collapse!(
                     |_, delimiter| matches!(delimiter, LetExpression | LetStatement | Where),
                     true ~ [.., (_, DeclarationGuard)] => {
+                        self.stack.pop();
                         self.insert_current();
                     },
                     false ~ _ => {
@@ -704,9 +709,7 @@ impl<'a> LexWithLayout<'a> {
                     |_, delimiter| delimiter.is_indented(),
                     true ~ _ => {
                         self.insert_current();
-                        if let Some((_, Square)) = self.stack.last() {
-                            self.stack.pop();
-                        }
+                        pop_match!(Square);
                     },
                 );
             }
@@ -719,9 +722,7 @@ impl<'a> LexWithLayout<'a> {
                     |_, delimiter| delimiter.is_indented(),
                     true ~ _ => {
                         self.insert_current();
-                        if let Some((_, Parenthesis)) = self.stack.last() {
-                            self.stack.pop();
-                        }
+                        pop_match!(Parenthesis);
                     },
                 );
             }
@@ -735,14 +736,14 @@ impl<'a> LexWithLayout<'a> {
                     |_, delimiter| delimiter.is_indented(),
                     true ~ _ => {
                         self.insert_current();
-                        if let Some((_, Property)) = self.stack.last() {
-                            self.stack.pop();
-                        }
-                        if let Some((_, Brace)) = self.stack.last() {
-                            self.stack.pop();
-                        }
+                        pop_match!(Property);
+                        pop_match!(Brace);
                     },
                 );
+            }
+            lower_name!(_) => {
+                self.collapse_and_insert_current();
+                pop_match!(Property);
             }
             _ => {
                 self.collapse_and_insert_current();
